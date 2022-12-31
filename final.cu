@@ -222,6 +222,78 @@ void energyCalc(int* xSombelOut, int* ySomberOut, int width, int height, int* ou
 		outPixels[i] = abs(xSombelOut[i]) + abs(ySomberOut[i]);
 	}
 }
+
+void constructEnergyCostPathTable(int *energy, int width, int height, int* costTable,int* pathTable){
+	for(int r = 0; r < height; r++){
+		for(int c = 0; c < width; c++){
+			if(r == 0){
+				costTable[c] = energy[c];
+				pathTable[c] = 0;
+			}else{
+				int idx = r * width + c;
+
+				int minRIdx = r - 1;
+				
+				int leftC = max(0, c - 1);
+
+				int rightC = min(width - 1, c + 1);
+
+				int leftVal = costTable[minRIdx * width + leftC];
+				int midVal = costTable[minRIdx * width + c];
+				int rightVal = costTable[minRIdx * width + rightC];
+
+				int minVal = min(leftVal, min(midVal, rightVal));
+
+				costTable[idx] = minVal + energy[idx];
+				if(minVal == leftVal){
+					if(leftC == c){
+						pathTable[idx] = 0;
+					}else{
+						pathTable[idx] = -1;
+					}
+				}else if(minVal == midVal){
+					pathTable[idx] = 0;
+				}else{
+					if(rightC == c){
+						pathTable[idx] = 0;
+					}else{
+						pathTable[idx] = 1;
+					}
+				}
+
+			}
+		}
+	}
+}
+
+int findMinCIdx(int* costTable, int width, int height){
+	int idx = (height -1) * width;
+	int result = 0;
+	int currentMin = costTable[idx];
+	for(int i = 0; i < width; i++){
+		if(costTable[idx + i] <=  currentMin){
+			currentMin = costTable[idx + i];
+			result = i;
+		}
+	}
+	return result;
+}
+
+void findSeam(int minCIdx, int* pathTable, int width, int height, int* seamPos){
+	for(int r = height - 1; r >= 0; r--){
+		seamPos[r * 2] = r;		
+		seamPos[r * 2 + 1] = minCIdx;		
+
+		int nextC = pathTable[r * width + minCIdx];
+		if(nextC == -1){
+			minCIdx --;
+
+		}else if(nextC == 1){
+			minCIdx++;
+		}
+	}
+}
+
 void seamOnHost(unsigned char* inPixels, int width, int height, unsigned char* outPixels){
 
 	// Allocate memory
@@ -237,6 +309,13 @@ void seamOnHost(unsigned char* inPixels, int width, int height, unsigned char* o
 	// energy
 	int *energy = (int*) malloc(width * height * sizeof(int));
 
+	// construct energy cost table
+	int *costTable = (int*) malloc(width * height * sizeof(int));
+	int *pathTable = (int*) malloc(width * height * sizeof(int));
+
+	// find seam
+	int * seamPos = (int*) malloc(height * 2 * sizeof(int));
+
 	// Execute
 	timer.Start();
 	// grayScale
@@ -250,9 +329,22 @@ void seamOnHost(unsigned char* inPixels, int width, int height, unsigned char* o
 
 	// energy
 	energyCalc(xSombelOut, ySombelOut, width, height, energy);
+
+	// construct energy cost table
+	constructEnergyCostPathTable(energy, width, height, costTable, pathTable);
+
+	// find min column
+	int minColumn = findMinCIdx(costTable, width, height);
+
+	// find seam
+	findSeam(minColumn, pathTable, width, height, seamPos);
+
 	timer.Stop();
 	float time = timer.Elapsed();
 	printf("Processing time of host: %f ms\n\n", time);
+	for(int i = 0 ; i < height; i++){
+		printf("y: %i, x: %i\n", seamPos[i*2], seamPos[i*2+1]);
+	}
 
 	// copy result out
 	for(int i = 0; i < width * height; i++){
@@ -260,10 +352,12 @@ void seamOnHost(unsigned char* inPixels, int width, int height, unsigned char* o
 	}
 
 	free(grayScale);
+	free(costTable); 
+	free(pathTable);
 	free(xSombelOut);
 	free(ySombelOut);
 	free(energy);
-
+	free(seamPos);
 }
 
 void readPnm(char * fileName, int &width, int &height, unsigned char * &pixels)
