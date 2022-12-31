@@ -294,7 +294,7 @@ void findSeam(int minCIdx, int* pathTable, int width, int height, int* seamPos){
 	}
 }
 
-void seamOnHost(unsigned char* inPixels, int width, int height, unsigned char* outPixels){
+void findSeamOnHost(unsigned char* inPixels, int width, int height, int* seamPos){
 
 	// Allocate memory
 	GpuTimer timer;
@@ -312,9 +312,6 @@ void seamOnHost(unsigned char* inPixels, int width, int height, unsigned char* o
 	// construct energy cost table
 	int *costTable = (int*) malloc(width * height * sizeof(int));
 	int *pathTable = (int*) malloc(width * height * sizeof(int));
-
-	// find seam
-	int * seamPos = (int*) malloc(height * 2 * sizeof(int));
 
 	// Execute
 	timer.Start();
@@ -342,14 +339,6 @@ void seamOnHost(unsigned char* inPixels, int width, int height, unsigned char* o
 	timer.Stop();
 	float time = timer.Elapsed();
 	printf("Processing time of host: %f ms\n\n", time);
-	for(int i = 0 ; i < height; i++){
-		printf("y: %i, x: %i\n", seamPos[i*2], seamPos[i*2+1]);
-	}
-
-	// copy result out
-	for(int i = 0; i < width * height; i++){
-		outPixels[i] = energy[i];
-	}
 
 	free(grayScale);
 	free(costTable); 
@@ -357,8 +346,8 @@ void seamOnHost(unsigned char* inPixels, int width, int height, unsigned char* o
 	free(xSombelOut);
 	free(ySombelOut);
 	free(energy);
-	free(seamPos);
 }
+
 
 void readPnm(char * fileName, int &width, int &height, unsigned char * &pixels)
 {
@@ -452,24 +441,16 @@ int main(int argc, char ** argv)
 
 	// Read input image file
 	int width, height;
-	unsigned char * inPixels, *hostOutPixels, *deviceOutPixels;
+	unsigned char * inPixels;
 	readPnm(argv[1], width, height, inPixels);
 	printf("\nImage size (width x height): %i x %i\n", width, height);
 
-	hostOutPixels = (unsigned char*) malloc(width * height);
-	seamOnHost(inPixels, width, height, hostOutPixels);
+	int *hostSeamPos = (int*) malloc(height * 2 * sizeof(int));
+	findSeamOnHost(inPixels, width, height, hostSeamPos);
+	for(int i = 0; i < height; i++){
+		printf("y: %i, x: %i\n", hostSeamPos[i*2], hostSeamPos[i*2+1]);
+	}
 
-	deviceOutPixels = (unsigned char*) malloc(width * height);
-	seamOnDeivce(inPixels, width, height, deviceOutPixels, dim3(32, 32));
-
-
-	double correct = checkCorrect(hostOutPixels, deviceOutPixels, width, height);
-	printf("ERROR: %f", correct);
-
-    char * outFileNameBase = strtok(argv[2], "."); // Get rid of extension
-	writePnm(hostOutPixels, 1, width, height, concatStr(outFileNameBase, "_out_host.pnm"));
-	writePnm(deviceOutPixels, 1, width, height, concatStr(outFileNameBase, "_out_device.pnm"));
 	free(inPixels);
-	free(hostOutPixels);
-	free(deviceOutPixels);
+	free(hostSeamPos);
 }
