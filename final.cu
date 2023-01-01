@@ -590,7 +590,7 @@ int main(int argc, char ** argv)
 	int *outCostTableDevice = (int*) malloc(width * height * sizeof(int));
 	int *outPathTableDevice = (int*) malloc(width * height * sizeof(int));
 	int outMinColIdxDevice;
-	findSeamOnDeivce(inPixels, width, height,deviceSeamPos ,outCostTableDevice, outPathTableDevice, outMinColIdxDevice,dim3(32, 32), 512, 512);
+	findSeamOnDeivce(inPixels, width, height,deviceSeamPos ,outCostTableDevice, outPathTableDevice, outMinColIdxDevice,dim3(32, 32), 512, 256);
 
 	double errCostTable = checkCorrect(outCostTableDevice, outCostTableHost, width, height);
 	double errPathTable = checkCorrect(outPathTableDevice, outPathTableHost, width, height);
