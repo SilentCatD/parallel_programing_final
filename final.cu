@@ -100,19 +100,15 @@ __global__ void convertRgb2GrayKernel(unsigned char * inPixels, int width, int h
 	}
 }
 
-__device__ int bCount = 0;
-__global__ void constructEnergyCostPathTableKernel(int* energy, int width, int height, int* costTable, int*pathTable){
-
+__global__ void constructEnergyCostPathTableKernel(int r, int* energy, int width, int height, int* costTable, int*pathTable){
 
 	int cIdx = blockDim.x * blockIdx.x + threadIdx.x;
-	if(cIdx< width){
-		costTable[cIdx] = energy[cIdx];
-		pathTable[cIdx] = 0;
-	}
-	__syncthreads();
 
 	if(cIdx < width){
-		for(int r = 1; r < height; r++){
+		if(r == 0){
+			costTable[cIdx] = energy[cIdx];
+			pathTable[cIdx] = 0;
+		}else{
 
 			int minRIdx = r - 1;
 
@@ -143,19 +139,68 @@ __global__ void constructEnergyCostPathTableKernel(int* energy, int width, int h
 					pathTable[idx] = 1;
 				}
 			}
-
-			if(threadIdx.x == 0){
-				atomicAdd(&bCount ,1);
-				__threadfence();
-				while(bCount < r * gridDim.x){}
-			}
-			__syncthreads();
 		}
+	}
+}
+
+__global__ void findMinCIdxKernel(int *costTable, int width, int height, int sharedArrMemSize, int* localMinIdx, int* localMin){
+	extern __shared__ int s_mem[];
+	int* s_costVal = (int*) s_mem;	
+	int* s_costIdx = (int *) &(s_mem[sharedArrMemSize]);
+
+	int lastRowIdx = (height - 1) * width;
+	
+	// Load data to shared mem
+	int i1 = 2 * blockDim.x * blockIdx.x + threadIdx.x;
+	int i2 = i1 +  blockDim.x;
+
+	if(i1 < width){
+		s_costVal[threadIdx.x] = costTable[lastRowIdx + i1];
+		s_costIdx[threadIdx.x] = i1;
+	}
+	if(i2 < width){
+		s_costVal[threadIdx.x + blockDim.x] = costTable[lastRowIdx + i2];
+		s_costIdx[threadIdx.x + blockDim.x] = i2;
+	}
+	__syncthreads();
+
+	for(int stride = blockDim.x; stride > 0; stride/=2){
+		if(threadIdx.x < stride){
+			int value1 = s_costVal[threadIdx.x];
+			int value2 = s_costVal[threadIdx.x + stride];
+			int index1= s_costIdx[threadIdx.x];
+			int index2 = s_costIdx[threadIdx.x + stride];
+			if(index1 < width && index2 < width && value2 < value1){
+				s_costVal[threadIdx.x] = value2;
+				s_costIdx[threadIdx.x] = index2;
+			}
+		}
+		__syncthreads();
+	}
+
+	if(threadIdx.x == 0){
+		localMinIdx[blockIdx.x] = s_costIdx[0];
+		localMin[blockIdx.x] = s_costVal[0];
 	}
 
 }
 
-void findSeamOnDeivce(unsigned char* inPixels, int width, int height, int* outPixels, dim3 convoBlockSize = dim3(1, 1), int costTableBlockSize = 1024){
+void findSeam(int minCIdx, int* pathTable, int width, int height, int* seamPos){
+	for(int r = height - 1; r >= 0; r--){
+		seamPos[r * 2] = r;		
+		seamPos[r * 2 + 1] = minCIdx;		
+
+		int nextC = pathTable[r * width + minCIdx];
+		if(nextC == -1){
+			minCIdx --;
+
+		}else if(nextC == 1){
+			minCIdx++;
+		}
+	}
+}
+
+void findSeamOnDeivce(unsigned char* inPixels, int width, int height, int* deviceSeamPos, int* outCostTable, int* outPathTable, int &outMinColIdx, dim3 convoBlockSize = dim3(1, 1), int costTableBlockSize = 1024, int minColIdxBlockSize = 512){
 
 	// Allocate memory
 	GpuTimer timer;
@@ -171,6 +216,8 @@ void findSeamOnDeivce(unsigned char* inPixels, int width, int height, int* outPi
 	CHECK(cudaMemcpy(d_inPixels, inPixels, nBytes * 3, cudaMemcpyHostToDevice));
 	dim3 gridSize((width - 1) / convoBlockSize.x + 1, (height - 1) / convoBlockSize.y + 1);
 	int costTableGridSize = (width - 1) / costTableBlockSize + 1;
+	int minColIdxGridSize  = (width - 1)/ (minColIdxBlockSize * 2) + 1; 
+	int minColIdxSharedDataSize = minColIdxBlockSize * 4 * sizeof(int);
 
 	// grayScale
 	unsigned char *d_outGrayScale;
@@ -199,6 +246,13 @@ void findSeamOnDeivce(unsigned char* inPixels, int width, int height, int* outPi
 	CHECK(cudaMalloc(&d_costTable, width * height * sizeof(int)));
 	CHECK(cudaMalloc(&d_pathTable, width * height * sizeof(int)));
 
+	// find min idx
+	int* d_localMinIdx,* d_localMin;
+	CHECK(cudaMalloc(&d_localMinIdx, minColIdxGridSize * sizeof(int)));
+	CHECK(cudaMalloc(&d_localMin, minColIdxGridSize * sizeof(int)));
+	int * localMin = (int*)malloc(minColIdxGridSize * sizeof(int));
+	int* localMinIdx = (int*) malloc(minColIdxGridSize * sizeof(int));
+
 	// Execute
 	timer.Start();
 
@@ -215,14 +269,35 @@ void findSeamOnDeivce(unsigned char* inPixels, int width, int height, int* outPi
 	energyCalcKernel<<<gridSize, convoBlockSize>>>(d_xSombelOut, d_ySombelOut, width, height, d_energy);
 
 	// construct energy cost table
-	constructEnergyCostPathTableKernel<<<costTableGridSize, costTableBlockSize>>>(d_energy, width, height, d_costTable, d_pathTable);
+	for(int r = 0; r < height; r++){
+		constructEnergyCostPathTableKernel<<<costTableGridSize, costTableBlockSize>>>(r, d_energy, width, height, d_costTable, d_pathTable);
+	}
+
+	// find min idx
+	findMinCIdxKernel<<<minColIdxGridSize, minColIdxBlockSize, minColIdxSharedDataSize>>>(d_costTable, width, height, minColIdxBlockSize * 2, d_localMinIdx, d_localMin);
+	CHECK(cudaMemcpy(localMin, d_localMin, minColIdxGridSize * sizeof(int), cudaMemcpyDeviceToHost));
+	CHECK(cudaMemcpy(localMinIdx, d_localMinIdx, minColIdxGridSize * sizeof(int), cudaMemcpyDeviceToHost));
+
+	int minColumn = localMinIdx[0];
+	int minVal = localMin[0];
+	for(int i = 0 ; i < minColIdxGridSize; i++){
+		if(localMin[i] < minVal){
+			minVal = localMin[i];
+			minColumn = localMinIdx[i];
+		}
+	}
+
+	CHECK(cudaMemcpy(outPathTable, d_pathTable, width * height * sizeof(int), cudaMemcpyDeviceToHost));
+	findSeam(minColumn, outPathTable, width, height, deviceSeamPos);
+	
 
 	cudaDeviceSynchronize();
 	timer.Stop();
 	float time = timer.Elapsed();
 	printf("Processing time of device: %f ms\n\n", time);
 
-	CHECK(cudaMemcpy(outPixels, d_costTable, width * height * sizeof(int), cudaMemcpyDeviceToHost));
+	CHECK(cudaMemcpy(outCostTable, d_costTable, width * height * sizeof(int), cudaMemcpyDeviceToHost));
+	outMinColIdx = minColumn;
 
 	CHECK(cudaFree(d_inPixels));
 	CHECK(cudaFree(d_outGrayScale));
@@ -331,7 +406,7 @@ int findMinCIdx(int* costTable, int width, int height){
 	int result = 0;
 	int currentMin = costTable[idx];
 	for(int i = 0; i < width; i++){
-		if(costTable[idx + i] <=  currentMin){
+		if(costTable[idx + i] <  currentMin){
 			currentMin = costTable[idx + i];
 			result = i;
 		}
@@ -339,22 +414,8 @@ int findMinCIdx(int* costTable, int width, int height){
 	return result;
 }
 
-void findSeam(int minCIdx, int* pathTable, int width, int height, int* seamPos){
-	for(int r = height - 1; r >= 0; r--){
-		seamPos[r * 2] = r;		
-		seamPos[r * 2 + 1] = minCIdx;		
 
-		int nextC = pathTable[r * width + minCIdx];
-		if(nextC == -1){
-			minCIdx --;
-
-		}else if(nextC == 1){
-			minCIdx++;
-		}
-	}
-}
-
-void findSeamOnHost(unsigned char* inPixels, int width, int height, int* seamPos, int * outPixels){
+void findSeamOnHost(unsigned char* inPixels, int width, int height, int* seamPos, int * outCostTable, int* outPathTable, int &outMinColIdx){
 
 	// Allocate memory
 	GpuTimer timer;
@@ -401,8 +462,10 @@ void findSeamOnHost(unsigned char* inPixels, int width, int height, int* seamPos
 	printf("Processing time of host: %f ms\n\n", time);
 
 	for(int i = 0; i < width * height; i++){
-		outPixels[i] = costTable[i];
+		outCostTable[i] = costTable[i];
+		outPathTable[i] = pathTable[i];
 	}
+	outMinColIdx = minColumn;
 
 	free(grayScale);
 	free(costTable); 
@@ -500,6 +563,14 @@ double checkCorrect(int* out, int* out2, int width, int height){
 	return err;
 }
 
+double checkCorrectPos(int* out, int *out2, int height){
+	float err = 0;
+	for(int i = 0; i < height; i++){
+		err += abs(out[i*2] - out2[i*2]) + abs(out[i * 2 + 1] - out2[i * 2 + 1]);
+	}
+	return err / (height);
+}
+
 int main(int argc, char ** argv)
 {
 
@@ -510,17 +581,35 @@ int main(int argc, char ** argv)
 	printf("\nImage size (width x height): %i x %i\n", width, height);
 
 	int *hostSeamPos = (int*) malloc(height * 2 * sizeof(int));
-	int *outPixelsHost = (int*) malloc(width * height * sizeof(int));
-	findSeamOnHost(inPixels, width, height, hostSeamPos, outPixelsHost);
+	int *outCostTableHost = (int*) malloc(width * height * sizeof(int));
+	int *outPathTableHost = (int*) malloc(width * height * sizeof(int));
+	int outMinColIdxHost;
+	findSeamOnHost(inPixels, width, height, hostSeamPos, outCostTableHost, outPathTableHost, outMinColIdxHost);
 
-	int *outPixelsDevice = (int*) malloc(width* height  * sizeof(int));
-	findSeamOnDeivce(inPixels, width, height, outPixelsDevice,dim3(32, 32), 512);
+	int *deviceSeamPos = (int*) malloc(height * 2 * sizeof(int));
+	int *outCostTableDevice = (int*) malloc(width * height * sizeof(int));
+	int *outPathTableDevice = (int*) malloc(width * height * sizeof(int));
+	int outMinColIdxDevice;
+	findSeamOnDeivce(inPixels, width, height,deviceSeamPos ,outCostTableDevice, outPathTableDevice, outMinColIdxDevice,dim3(32, 32), 512, 512);
 
-	double err = checkCorrect(outPixelsHost, outPixelsDevice, width, height);
-	printf("Error: %f\n", err);
+	double errCostTable = checkCorrect(outCostTableDevice, outCostTableHost, width, height);
+	double errPathTable = checkCorrect(outPathTableDevice, outPathTableHost, width, height);
+	double errPos =  checkCorrectPos(hostSeamPos, deviceSeamPos, height);
+	printf("Error cost table: %f\n", errCostTable);
+	printf("Error path table: %f\n", errPathTable);
+	printf("min col host: %d | min col device: %d\n", outMinColIdxHost, outMinColIdxDevice);
+	printf("Error seam pos: %f\n", errPos);
+
+	// for(int i = 0; i < height; i++){
+	// 	printf("host pos: %d, %d | device pos: %d %d\n", hostSeamPos[i*2], hostSeamPos[i*2+1], deviceSeamPos[i*2], deviceSeamPos[i*2 +  1]);
+	// }
+
 
 	free(inPixels);
 	free(hostSeamPos);
-	free(outPixelsHost);
-	free(outPixelsDevice);
+	free(deviceSeamPos);
+	free(outCostTableHost);
+	free(outPathTableHost);
+	free(outCostTableDevice);
+	free(outPathTableDevice);
 }
