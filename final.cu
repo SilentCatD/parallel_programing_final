@@ -514,7 +514,7 @@ int main(int argc, char ** argv)
 	findSeamOnHost(inPixels, width, height, hostSeamPos, outPixelsHost);
 
 	int *outPixelsDevice = (int*) malloc(width* height  * sizeof(int));
-	findSeamOnDeivce(inPixels, width, height, outPixelsDevice,dim3(32, 32), 1024);
+	findSeamOnDeivce(inPixels, width, height, outPixelsDevice,dim3(32, 32), 512);
 
 	double err = checkCorrect(outPixelsHost, outPixelsDevice, width, height);
 	printf("Error: %f\n", err);
