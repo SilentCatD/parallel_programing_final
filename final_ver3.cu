@@ -767,10 +767,10 @@ int main(int argc, char ** argv)
 	outPixelsDevice = (unsigned char*) malloc(3 * width * height * sizeof(unsigned char));
 	printf("\nImage size (width x height): %i x %i\n", width, height);
 	addNSeam(inPixels, width, height, newWidth, outPixels, 2);
+	writePnm(outPixels, 3, newWidth, height, concatStr(argv[2], "_host.pnm"));
 	addNSeam(inPixels, width, height, newWidth, outPixelsDevice, 2, false, dim3(32, 32), dim3(32, 32));
 	float addSeamError = checkCorrect(outPixels, outPixelsDevice,newWidth,height);
 	printf("Error: %f\n", addSeamError);
-	writePnm(outPixels, 3, newWidth, height, concatStr(argv[2], "_host.pnm"));
 	writePnm(outPixelsDevice, 3, newWidth, height, concatStr(argv[2], "_device.pnm"));
 	free(inPixels);
 	free(outPixels);
