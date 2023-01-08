@@ -231,6 +231,29 @@ __global__ void findMinCIdxKernel(int *costTable, int width, int height, int sha
 
 }
 
+__global__ void addSeamOnDevice(unsigned char* d_inPixels, unsigned char* d_outPixels, int width, int height, int* deviceSeamPos)
+{
+	// do stuff
+	int r = blockIdx.y * blockDim.y + threadIdx.y;
+	int c = blockIdx.x * blockDim.x + threadIdx.x;
+	if (c < width && r < height) {
+		int i = r * width + c;
+		int o = r * (width + 1) + c;
+		if (c <= deviceSeamPos[2 * r + 1]) {
+			d_outPixels[3 * o] = d_inPixels[3 * i];
+			d_outPixels[3 * o + 1] = d_inPixels[3 * i + 1];
+			d_outPixels[3 * o + 2] = d_inPixels[3 * i + 2];
+			// printf("small%c\n", d_inPixels[3 * i]);
+		}
+		if (c >= deviceSeamPos[2 * r + 1]) {
+			d_outPixels[3 * o + 3] = d_inPixels[3 * i];
+			d_outPixels[3 * o + 4] = d_inPixels[3 * i + 1];
+			d_outPixels[3 * o + 5] = d_inPixels[3 * i + 2];
+			// printf("big%c\n", d_inPixels[3 * i + 2]);
+		}
+	}
+}
+
 void findSeam(int minCIdx, int* pathTable, int width, int height, int* seamPos){
 	for(int r = height - 1; r >= 0; r--){
 		seamPos[r * 2] = r;		
@@ -361,6 +384,31 @@ void findSeamOnDeivce(unsigned char* inPixels, int width, int height, int* devic
 	CHECK(cudaFree(d_pathTable));
     CHECK(cudaStreamDestroy(xSombelConvoStream));
     CHECK(cudaStreamDestroy(ySombelConvoStream));
+}
+
+void addSeam(unsigned char* inPixels, int& width, int height, int* deviceSeamPos, int nSeamAdd, dim3 convoBlockSize = dim3(1, 1))
+{
+	int* d_SeamPos;
+	CHECK(cudaMalloc(&d_SeamPos, height * sizeof(int) * 2));
+	CHECK(cudaMemcpy(d_SeamPos, deviceSeamPos, height * sizeof(int) * 2, cudaMemcpyHostToDevice));
+	unsigned char* d_outPixels;
+	unsigned char* d_inPixels;
+	CHECK(cudaMalloc(&d_inPixels, width * height * sizeof(unsigned char) * 3));
+	CHECK(cudaMemcpy(d_inPixels, inPixels, width * height * sizeof(unsigned char) * 3, cudaMemcpyHostToDevice));
+	for (int num = 0; num < nSeamAdd; num++) {
+		dim3 gridSize((width - 1) / convoBlockSize.x + 1, (height - 1) / convoBlockSize.y + 1);
+		CHECK(cudaMalloc(&d_outPixels, (width + 1) * height * sizeof(unsigned char) * 3));	
+		// printf("width = %d\n",width);
+		addSeamOnDevice<<<gridSize, convoBlockSize>>>(d_inPixels, d_outPixels, width, height, d_SeamPos);
+		CHECK(cudaFree(d_inPixels));
+		CHECK(cudaMalloc(&d_inPixels, (width + 1) * height * sizeof(unsigned char) * 3));
+		CHECK(cudaMemcpy(d_inPixels, d_outPixels, (width + 1) * height * sizeof(unsigned char) * 3, cudaMemcpyDeviceToDevice));
+		CHECK(cudaFree(d_outPixels));
+		width++;
+	}
+	free(inPixels);
+	inPixels = (unsigned char*)malloc(width * height * sizeof(unsigned char) * 3);
+	CHECK(cudaMemcpy(inPixels, d_inPixels, width * height * sizeof(unsigned char) * 3, cudaMemcpyDeviceToHost));
 }
 
 void convertRgb2Gray(unsigned char * inPixels, int width, int height,
@@ -657,6 +705,10 @@ int main(int argc, char ** argv)
 	// 	printf("host pos: %d, %d | device pos: %d %d\n", hostSeamPos[i*2], hostSeamPos[i*2+1], deviceSeamPos[i*2], deviceSeamPos[i*2 +  1]);
 	// }
 
+	addSeam(inPixels, width, height, deviceSeamPos, 100, dim3(32, 32));
+	printf("width: %d", width);
+	char * outFileNameBase = strtok(argv[2], "."); // Get rid of extension
+	writePnm(inPixels, 3, width, height, concatStr(outFileNameBase, "_device.pnm"));
 
 	free(inPixels);
 	free(hostSeamPos);
