@@ -616,9 +616,9 @@ double checkCorrectPos(int* out, int *out2, int height){
 __global__ void removeSeamOnDeviceKernel(unsigned char * inPixels, int width, int height, unsigned char* outPixels, int* hostSeamPos){
 	int r = blockIdx.y * blockDim.y + threadIdx.y;
 	int c = blockIdx.x * blockDim.x + threadIdx.x;
-	if(r < height && c < width){
+	int newWidth = width - 1;
+	if(r < height && c < newWidth){
 		int seamColIdx = hostSeamPos[r];
-		int newWidth = width - 1;
 		int outIdx = 3 * (r * newWidth + c);
 		int inIdx;
 		if(c < seamColIdx){
@@ -746,8 +746,8 @@ int main(int argc, char ** argv)
 	outPixels = (unsigned char*) malloc(3 * width * height * sizeof(unsigned char));
 	outPixelsDevice = (unsigned char*) malloc(3 * width * height * sizeof(unsigned char));
 	printf("\nImage size (width x height): %i x %i\n", width, height);
-	removeNSeam(inPixels, width, height, newWidth, outPixels, 100);
-	removeNSeam(inPixels, width, height, newWidth, outPixelsDevice, 100, false, dim3(32, 32), dim3(32, 32));
+	removeNSeam(inPixels, width, height, newWidth, outPixels, 10);
+	removeNSeam(inPixels, width, height, newWidth, outPixelsDevice, 10, false, dim3(32, 32), dim3(32, 32));
 	float removeSeamError = checkCorrect(outPixels, outPixelsDevice,newWidth,height);
 	printf("Error: %f\n", removeSeamError);
 	writePnm(outPixels, 3, newWidth, height, concatStr(argv[2], "_host.pnm"));
