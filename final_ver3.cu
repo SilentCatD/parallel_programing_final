@@ -734,16 +734,21 @@ void addNSeam(unsigned char *inPixels, int width, int height, int &newWidth, uns
 	timer.Start();
 	for(int i=0; i < nSeam;i++){
 		if(useHost){
+			outPixels = (unsigned char*) malloc(3 * (newWidth + 1) * height * sizeof(unsigned char));
 			addSeamOnHost(tmpIn, width, height, outPixels);
 		}else{
+			outPixels = (unsigned char*) malloc(3 * (newWidth + 1) * height * sizeof(unsigned char));
 			addSeamOnDevice(tmpIn, width, height, outPixels, convoBlockSize, addSeamBlockSize, costTableBlockSize, minColIdxBlockSize);
 		}
 		newWidth++;
 		if(nSeam > 1){
 			width = newWidth;
 			memcpy(tmpIn, outPixels, width * height * 3 * sizeof(unsigned char));
+			cudaFree(outPixels);
 		}
 	}
+	outPixels = (unsigned char*) malloc(3 * width * height * sizeof(unsigned char));
+	memcpy(outPixels, tmpIn, width * height * 3 * sizeof(unsigned char));
 
 	timer.Stop();
 	float time = timer.Elapsed();
@@ -763,8 +768,8 @@ int main(int argc, char ** argv)
 	int width, height, newWidth;
 	unsigned char * inPixels, * outPixels, *outPixelsDevice;
 	readPnm(argv[1], width, height, inPixels);
-	outPixels = (unsigned char*) malloc(3 * width * height * sizeof(unsigned char));
-	outPixelsDevice = (unsigned char*) malloc(3 * width * height * sizeof(unsigned char));
+	// outPixels = (unsigned char*) malloc(3 * width * height * sizeof(unsigned char));
+	// outPixelsDevice = (unsigned char*) malloc(3 * width * height * sizeof(unsigned char));
 	printf("\nImage size (width x height): %i x %i\n", width, height);
 	addNSeam(inPixels, width, height, newWidth, outPixels, 2);
 	writePnm(outPixels, 3, newWidth, height, concatStr(argv[2], "_host.pnm"));
