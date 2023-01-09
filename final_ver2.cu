@@ -813,7 +813,7 @@ void addNSeam(unsigned char *inPixels, int width, int height, int &newWidth, uns
 
 			addSeamOnDeviceKernel<<<gridSize,addSeamBlockSize>>>(d_inPixels, newWidth, height, d_outPixels, d_deviceSeamPos);
 
-			CHECK(cudaMemcpy(outPixels, d_outPixels,  3 * newWidth * height * sizeof(unsigned char), cudaMemcpyDeviceToHost));
+			CHECK(cudaMemcpy(outPixels, d_outPixels,  3 * (newWidth + 1) * height * sizeof(unsigned char), cudaMemcpyDeviceToHost));
 		}
 		newWidth++;
 		if(nSeam > 1){
