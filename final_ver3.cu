@@ -743,11 +743,14 @@ void addNSeam(unsigned char *inPixels, int width, int height, int &newWidth, uns
 		newWidth++;
 		if(nSeam > 1){
 			width = newWidth;
+			free(tmpIn);
+			tmpIn = (unsigned char*) malloc(3 * newWidth * height * sizeof(unsigned char));
 			memcpy(tmpIn, outPixels, width * height * 3 * sizeof(unsigned char));
-			cudaFree(outPixels);
+			free(outPixels);
 		}
 	}
-	outPixels = (unsigned char*) malloc(3 * width * height * sizeof(unsigned char));
+
+	outPixels = (unsigned char*) malloc(3 * newWidth * height * sizeof(unsigned char));
 	memcpy(outPixels, tmpIn, width * height * 3 * sizeof(unsigned char));
 
 	timer.Stop();
