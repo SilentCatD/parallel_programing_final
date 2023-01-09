@@ -726,13 +726,14 @@ void removeNSeam(unsigned char *inPixels, int width, int height, int &newWidth, 
 __global__ void addSeamOnDeviceKernel(unsigned char * inPixels, int width, int height, unsigned char* outPixels, int* seamPos){
 	int r = blockIdx.y * blockDim.y + threadIdx.y;
 	int c = blockIdx.x * blockDim.x + threadIdx.x;
-	if(r < height && c < width + 1){
+	int newWidth = width + 1;
+	if(r < height && c < newWidth){
 		int seamColIdx = seamPos[r];
-		int outIdx = 3 * (r * (width + 1) + c);
+		int outIdx = 3 * (r * newWidth + c);
 		if(c!= seamColIdx){
 			int inIdx;
 			if(c < seamColIdx){
-				inIdx = r * width + c;
+				inIdx = r * width  + c;
 			}
 			else{
 				inIdx = r * width + c - 1;
@@ -885,8 +886,8 @@ int main(int argc, char ** argv)
 	writePnm(outPixelsRemove, 3, newWidthRemove, height, concatStr(fileName, "_remove_host.pnm"));
 	writePnm(outPixelsRemoveDevice, 3, newWidthRemove, height, concatStr(fileName, "_remove_device.pnm"));
 
-	writePnm(outPixelAdd, 3, newWidthAdd, height, concatStr(fileName, "_add_host.pnm"));
 	writePnm(outPixelAddDevice, 3, newWidthAdd, height, concatStr(fileName, "_add_device.pnm"));
+	writePnm(outPixelAdd, 3, newWidthAdd, height, concatStr(fileName, "_add_host.pnm"));
 
 	free(inPixels);
 	free(outPixelsRemove);

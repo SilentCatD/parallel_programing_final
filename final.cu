@@ -192,8 +192,7 @@ __global__ void findMinCIdxKernel(int *costTable, int width, int height, int sha
 }
 void findSeam(int minCIdx, int* pathTable, int width, int height, int* seamPos){
 	for(int r = height - 1; r >= 0; r--){
-		seamPos[r * 2] = r;		
-		seamPos[r * 2 + 1] = minCIdx;		
+		seamPos[r] = minCIdx;		
 
 		int nextC = pathTable[r * width + minCIdx];
 		if(nextC == -1){
@@ -205,15 +204,11 @@ void findSeam(int minCIdx, int* pathTable, int width, int height, int* seamPos){
 	}
 }
 
+
 void findSeamOnDeivce(unsigned char* inPixels, int width, int height, int* deviceSeamPos, int* outCostTable, int* outPathTable, int &outMinColIdx, dim3 convoBlockSize = dim3(1, 1), int costTableBlockSize = 1024, int minColIdxBlockSize = 512){
 
 	// Allocate memory
-	GpuTimer timer;
 	int filterWidth = 3;
-	cudaDeviceProp devProp;
-	cudaGetDeviceProperties(&devProp, 0);
-	printf("GPU name: %s\n", devProp.name);
-	printf("GPU compute capability: %d.%d\n", devProp.major, devProp.minor);
 
 	unsigned char* d_inPixels;
 	size_t nBytes = width * height * sizeof(unsigned char);
@@ -259,7 +254,6 @@ void findSeamOnDeivce(unsigned char* inPixels, int width, int height, int* devic
 	int* localMinIdx = (int*) malloc(minColIdxGridSize * sizeof(int));
 
 	// Execute
-	timer.Start();
 
 	// grayScale
 	convertRgb2GrayKernel<<<gridSize, convoBlockSize>>>(d_inPixels, width, height, d_outGrayScale);
@@ -294,12 +288,7 @@ void findSeamOnDeivce(unsigned char* inPixels, int width, int height, int* devic
 
 	CHECK(cudaMemcpy(outPathTable, d_pathTable, width * height * sizeof(int), cudaMemcpyDeviceToHost));
 	findSeam(minColumn, outPathTable, width, height, deviceSeamPos);
-	
-
 	cudaDeviceSynchronize();
-	timer.Stop();
-	float time = timer.Elapsed();
-	printf("Processing time of device: %f ms\n\n", time);
 
 	CHECK(cudaMemcpy(outCostTable, d_costTable, width * height * sizeof(int), cudaMemcpyDeviceToHost));
 	outMinColIdx = minColumn;
@@ -314,6 +303,7 @@ void findSeamOnDeivce(unsigned char* inPixels, int width, int height, int* devic
 	CHECK(cudaFree(d_costTable));
 	CHECK(cudaFree(d_pathTable));
 }
+
 
 void convertRgb2Gray(unsigned char * inPixels, int width, int height,
 		unsigned char * outPixels)
@@ -423,7 +413,6 @@ int findMinCIdx(int* costTable, int width, int height){
 void findSeamOnHost(unsigned char* inPixels, int width, int height, int* seamPos, int * outCostTable, int* outPathTable, int &outMinColIdx){
 
 	// Allocate memory
-	GpuTimer timer;
 	// grayScale
 	unsigned char *grayScale = (unsigned char*) malloc(width * height * sizeof(unsigned char));
 	// xSomber
@@ -440,7 +429,6 @@ void findSeamOnHost(unsigned char* inPixels, int width, int height, int* seamPos
 	int *pathTable = (int*) malloc(width * height * sizeof(int));
 
 	// Execute
-	timer.Start();
 	// grayScale
 	convertRgb2Gray(inPixels,width, height, grayScale);
 
@@ -461,10 +449,6 @@ void findSeamOnHost(unsigned char* inPixels, int width, int height, int* seamPos
 
 	// find seam
 	findSeam(minColumn, pathTable, width, height, seamPos);
-
-	timer.Stop();
-	float time = timer.Elapsed();
-	printf("Processing time of host: %f ms\n\n", time);
 
 	for(int i = 0; i < width * height; i++){
 		outCostTable[i] = costTable[i];
@@ -559,11 +543,17 @@ char * concatStr(const char * s1, const char * s2)
     return result;
 }
 
-double checkCorrect(int* out, int* out2, int width, int height){
+double checkCorrect(unsigned char* out, unsigned char* out2, int width, int height){
 	float err = 0;
-	int n =  width * height;
-	for (int i = 0; i < n; i++)
-		err += abs(out[i] - out2[i]);
+	int n =  width * height * 3;
+	for(int r = 0; r < height; r++){
+		for(int c = 0; c < width; c++){
+			int idx = 3 * (r * width + c);
+			err += abs(out[idx] - out2[idx]);
+			err += abs(out[idx + 1] - out2[idx + 1]);
+			err += abs(out[idx + 2] - out2[idx + 2]);
+		}
+	}
 	err /= n;
 	return err;
 }
@@ -576,45 +566,280 @@ double checkCorrectPos(int* out, int *out2, int height){
 	return err / (height);
 }
 
+__global__ void removeSeamOnDeviceKernel(unsigned char * inPixels, int width, int height, unsigned char* outPixels, int* hostSeamPos){
+	int r = blockIdx.y * blockDim.y + threadIdx.y;
+	int c = blockIdx.x * blockDim.x + threadIdx.x;
+	int newWidth = width - 1;
+	if(r < height && c < newWidth){
+		int seamColIdx = hostSeamPos[r];
+		int outIdx = 3 * (r * newWidth + c);
+		int inIdx;
+		if(c < seamColIdx){
+			inIdx = r * width + c;
+		}
+		if(c >= seamColIdx){
+			inIdx = r * width + c + 1;
+		}
+		inIdx*=3;
+		outPixels[outIdx] = inPixels[inIdx];
+		outPixels[outIdx + 1] = inPixels[inIdx + 1];
+		outPixels[outIdx + 2] = inPixels[inIdx + 2];
+	}
+}
+
+void removeNSeam(unsigned char *inPixels, int width, int height, int &newWidth, unsigned char* outPixels, int nSeam = 1, bool useHost = true, dim3 convoBlockSize = dim3(1, 1), dim3 removeSeamBlockSize = dim3(1, 1), int costTableBlockSize = 1024, int minColIdxBlockSize = 512){
+
+	unsigned char* tmpIn = (unsigned char*) malloc(width * height * 3 * sizeof(unsigned char));
+	memcpy(tmpIn, inPixels, width * height * 3 * sizeof(unsigned char));
+	newWidth = width;
+
+	int *seamPos = (int*) malloc(height * sizeof(int));
+	int *outCostTable = (int*) malloc(width * height * sizeof(int));
+	int *outPathTable = (int*) malloc(width * height * sizeof(int));
+	int outMinColIdx;
+
+	unsigned char* d_inPixels,*d_outPixels;
+	int *d_deviceSeamPos;
+
+
+	if(!useHost){
+		cudaDeviceProp devProp;
+		cudaGetDeviceProperties(&devProp, 0);
+		printf("GPU name: %s\n", devProp.name);
+		printf("GPU compute capability: %d.%d\n", devProp.major, devProp.minor);
+
+		CHECK(cudaMalloc(&d_inPixels, 3 * width* height * sizeof(unsigned char)));
+		CHECK(cudaMalloc(&d_outPixels, 3 * width * height * sizeof(unsigned char)));
+		CHECK(cudaMalloc(&d_deviceSeamPos,  height * sizeof(int)));
+	}
+	GpuTimer timer;
+	timer.Start();
+	for(int i=0; i < nSeam;i++){
+		if(useHost){
+			findSeamOnHost(tmpIn, newWidth, height, seamPos, outCostTable, outPathTable, outMinColIdx);
+			for(int r = 0 ; r < height; r++){
+				for(int c = 0; c < newWidth - 1; c++){
+					int seamColIdx = seamPos[r];
+					int outIdx = 3 * (r * (newWidth - 1) + c);
+					int inIdx;
+					if(c < seamColIdx){
+						inIdx = r * newWidth + c;
+					}
+					if(c >= seamColIdx){
+						inIdx = r * newWidth + c + 1;
+					}
+					inIdx*=3;
+					outPixels[outIdx] = tmpIn[inIdx];
+					outPixels[outIdx + 1] = tmpIn[inIdx + 1];
+					outPixels[outIdx + 2] = tmpIn[inIdx + 2];
+				}
+			}
+		}else{
+			dim3 gridSize(((newWidth - 1) - 1) / removeSeamBlockSize.x + 1, (height - 1) / removeSeamBlockSize.y + 1);
+
+			findSeamOnDeivce(tmpIn, newWidth, height, seamPos ,outCostTable, outPathTable, outMinColIdx, convoBlockSize, costTableBlockSize, minColIdxBlockSize);
+
+			CHECK(cudaMemcpy(d_inPixels, tmpIn,  3 * newWidth * height * sizeof(unsigned char), cudaMemcpyHostToDevice));
+
+			CHECK(cudaMemcpy(d_deviceSeamPos, seamPos, height * sizeof(int), cudaMemcpyHostToDevice));
+
+			removeSeamOnDeviceKernel<<<gridSize,removeSeamBlockSize>>>(d_inPixels, newWidth, height, d_outPixels, d_deviceSeamPos);
+
+			CHECK(cudaMemcpy(outPixels, d_outPixels,  3 * newWidth * height * sizeof(unsigned char), cudaMemcpyDeviceToHost));
+		}
+		newWidth--;
+		if(nSeam > 1){
+			memcpy(tmpIn, outPixels, newWidth * height * 3 * sizeof(unsigned char));
+		}
+	}
+
+	timer.Stop();
+	float time = timer.Elapsed();
+	if(useHost){
+		printf("Processing time of host: %f ms\n\n", time);
+	}else{
+		printf("Processing time of device: %f ms\n\n", time);
+	}
+	free(tmpIn);
+	free(seamPos);
+	free(outCostTable);
+	free(outPathTable);
+	if(!useHost){
+		CHECK(cudaFree(d_inPixels));
+		CHECK(cudaFree(d_outPixels));
+		CHECK(cudaFree(d_deviceSeamPos));
+	}
+}
+
+__global__ void addSeamOnDeviceKernel(unsigned char * inPixels, int width, int height, unsigned char* outPixels, int* seamPos){
+	int r = blockIdx.y * blockDim.y + threadIdx.y;
+	int c = blockIdx.x * blockDim.x + threadIdx.x;
+	int newWidth = width + 1;
+	if(r < height && c < newWidth){
+		int seamColIdx = seamPos[r];
+		int outIdx = 3 * (r * newWidth + c);
+		if(c!= seamColIdx){
+			int inIdx;
+			if(c < seamColIdx){
+				inIdx = r * width  + c;
+			}
+			else{
+				inIdx = r * width + c - 1;
+			}
+			inIdx*=3;
+			outPixels[outIdx] = inPixels[inIdx];
+			outPixels[outIdx + 1] = inPixels[inIdx + 1];
+			outPixels[outIdx + 2] = inPixels[inIdx + 2];
+		}
+		else{
+			int inIdxR = 3 * (r * width + seamColIdx);
+			int inIdxL = 3 * (r * width + max(0,seamColIdx - 1));
+			outPixels[outIdx] = (inPixels[inIdxR] + inPixels[inIdxL]) / 2;	
+			outPixels[outIdx + 1] = (inPixels[inIdxR + 1] + inPixels[inIdxL + 1]) / 2;	
+			outPixels[outIdx + 2] = (inPixels[inIdxR + 2] + inPixels[inIdxL + 2]) / 2;	
+		}
+	}
+}
+
+void addNSeam(unsigned char *inPixels, int width, int height, int &newWidth, unsigned char* outPixels, int nSeam = 1, bool useHost = true, dim3 convoBlockSize = dim3(1, 1), dim3 addSeamBlockSize = dim3(1, 1), int costTableBlockSize = 1024, int minColIdxBlockSize = 512){
+
+	unsigned char* tmpIn = (unsigned char*) malloc((width + nSeam) * height * 3 * sizeof(unsigned char));
+	memcpy(tmpIn, inPixels, width * height * 3 * sizeof(unsigned char));
+	newWidth = width;
+
+	int *seamPos = (int*) malloc(height * sizeof(int));
+	int *outCostTable = (int*) malloc((width + nSeam) * height * sizeof(int));
+	int *outPathTable = (int*) malloc((width + nSeam) * height * sizeof(int));
+	int outMinColIdx;
+
+	unsigned char* d_inPixels,*d_outPixels;
+	int *d_deviceSeamPos;
+
+
+	if(!useHost){
+		cudaDeviceProp devProp;
+		cudaGetDeviceProperties(&devProp, 0);
+		printf("GPU name: %s\n", devProp.name);
+		printf("GPU compute capability: %d.%d\n", devProp.major, devProp.minor);
+
+		CHECK(cudaMalloc(&d_inPixels, 3 * (width + nSeam) * height * sizeof(unsigned char)));
+		CHECK(cudaMalloc(&d_outPixels, 3 * (width + nSeam) * height * sizeof(unsigned char)));
+		CHECK(cudaMalloc(&d_deviceSeamPos,  height * sizeof(int)));
+	}
+	GpuTimer timer;
+	timer.Start();
+	for(int i=0; i < nSeam;i++){
+		if(useHost){
+			findSeamOnHost(tmpIn, newWidth, height, seamPos, outCostTable, outPathTable, outMinColIdx);
+			for(int r = 0 ; r < height; r++){
+				for(int c = 0; c < newWidth + 1; c++){
+					int seamColIdx = seamPos[r];
+					int outIdx = 3 * (r * (newWidth + 1) + c);
+					if(c!= seamColIdx){
+						int inIdx;
+						if(c < seamColIdx){
+							inIdx = r * newWidth + c;
+						}
+						else{
+							inIdx = r * newWidth + c - 1;
+						}
+						inIdx*=3;
+						outPixels[outIdx] = tmpIn[inIdx];
+						outPixels[outIdx + 1] = tmpIn[inIdx + 1];
+						outPixels[outIdx + 2] = tmpIn[inIdx + 2];
+					}
+					else{
+						int inIdxR = 3 * (r * newWidth + seamColIdx);
+						int inIdxL = 3 * (r * newWidth + max(0,seamColIdx - 1));
+						outPixels[outIdx] = (tmpIn[inIdxR] + tmpIn[inIdxL]) / 2;	
+						outPixels[outIdx + 1] = (tmpIn[inIdxR + 1] + tmpIn[inIdxL + 1]) / 2;	
+						outPixels[outIdx + 2] = (tmpIn[inIdxR + 2] + tmpIn[inIdxL + 2]) / 2;	
+					}
+				}
+			}
+		}else{
+			dim3 gridSize(((newWidth + 1) - 1) / addSeamBlockSize.x + 1, (height - 1) / addSeamBlockSize.y + 1);
+
+			findSeamOnDeivce(tmpIn, newWidth, height,seamPos ,outCostTable, outPathTable, outMinColIdx, convoBlockSize, costTableBlockSize, minColIdxBlockSize);
+
+			CHECK(cudaMemcpy(d_inPixels, tmpIn,  3 * newWidth * height * sizeof(unsigned char), cudaMemcpyHostToDevice));
+
+			CHECK(cudaMemcpy(d_deviceSeamPos, seamPos, height * sizeof(int), cudaMemcpyHostToDevice));
+
+			addSeamOnDeviceKernel<<<gridSize,addSeamBlockSize>>>(d_inPixels, newWidth, height, d_outPixels, d_deviceSeamPos);
+
+			CHECK(cudaMemcpy(outPixels, d_outPixels,  3 * newWidth * height * sizeof(unsigned char), cudaMemcpyDeviceToHost));
+		}
+		newWidth++;
+		if(nSeam > 1){
+			memcpy(tmpIn, outPixels, newWidth * height * 3 * sizeof(unsigned char));
+		}
+	}
+
+	timer.Stop();
+	float time = timer.Elapsed();
+	if(useHost){
+		printf("Processing time of host: %f ms\n\n", time);
+	}else{
+		printf("Processing time of device: %f ms\n\n", time);
+	}
+	free(tmpIn);
+	free(seamPos);
+	free(outCostTable);
+	free(outPathTable);
+	if(!useHost){
+		CHECK(cudaFree(d_inPixels));
+		CHECK(cudaFree(d_outPixels));
+		CHECK(cudaFree(d_deviceSeamPos));
+	}
+}
 int main(int argc, char ** argv)
 {
 
+	if(argc != 4){
+		printf("INVALID ARGUMENT, it must be: <filename>.pnm <nSeam to remove> <nSeam to add>");
+	}
+
 	// Read input image file
-	int width, height;
-	unsigned char * inPixels;
+	int width, height, newWidthRemove, newWidthAdd;
+	unsigned char * inPixels, * outPixelsRemove, *outPixelsRemoveDevice, *outPixelAdd, *outPixelAddDevice;
 	readPnm(argv[1], width, height, inPixels);
+	
+	int nSeamRemove =  atoi(argv[2]);
+	int nSeamAdd =  atoi(argv[3]);
+
+	outPixelsRemove = (unsigned char*) malloc(3 * width * height * sizeof(unsigned char));
+	outPixelsRemoveDevice = (unsigned char*) malloc(3 * width * height * sizeof(unsigned char));
+	outPixelAdd =		(unsigned char*) malloc(3 * (width + nSeamAdd) * height * sizeof(unsigned char));
+	outPixelAddDevice = (unsigned char*) malloc(3 * (width + nSeamAdd) * height * sizeof(unsigned char));
+	
+
 	printf("\nImage size (width x height): %i x %i\n", width, height);
 
-	int *hostSeamPos = (int*) malloc(height * 2 * sizeof(int));
-	int *outCostTableHost = (int*) malloc(width * height * sizeof(int));
-	int *outPathTableHost = (int*) malloc(width * height * sizeof(int));
-	int outMinColIdxHost;
-	findSeamOnHost(inPixels, width, height, hostSeamPos, outCostTableHost, outPathTableHost, outMinColIdxHost);
+	printf("REMOVE SEAM:\n");
+	removeNSeam(inPixels, width, height, newWidthRemove, outPixelsRemove, nSeamRemove);
+	removeNSeam(inPixels, width, height, newWidthRemove, outPixelsRemoveDevice, nSeamRemove, false, dim3(32, 32), dim3(32, 32), 512, 512);
+	float removeSeamError = checkCorrect(outPixelsRemove, outPixelsRemoveDevice,newWidthRemove,height);
+	printf("Remove error: %f\n", removeSeamError);
+	printf("=============================================\n");
 
-	int *deviceSeamPos = (int*) malloc(height * 2 * sizeof(int));
-	int *outCostTableDevice = (int*) malloc(width * height * sizeof(int));
-	int *outPathTableDevice = (int*) malloc(width * height * sizeof(int));
-	int outMinColIdxDevice;
-	findSeamOnDeivce(inPixels, width, height,deviceSeamPos ,outCostTableDevice, outPathTableDevice, outMinColIdxDevice,dim3(32, 32), 512, 256);
+	printf("ADD SEAM:\n");
+	addNSeam(inPixels, width, height, newWidthAdd, outPixelAdd, nSeamAdd);
+	addNSeam(inPixels, width, height, newWidthAdd, outPixelAddDevice, nSeamAdd, false, dim3(32, 32), dim3(32, 32), 512, 256);
+	float addSeamError = checkCorrect(outPixelAdd, outPixelAddDevice, newWidthAdd, height);
+	printf("Add error: %f\n", addSeamError);
 
-	double errCostTable = checkCorrect(outCostTableDevice, outCostTableHost, width, height);
-	double errPathTable = checkCorrect(outPathTableDevice, outPathTableHost, width, height);
-	double errPos =  checkCorrectPos(hostSeamPos, deviceSeamPos, height);
-	printf("Error cost table: %f\n", errCostTable);
-	printf("Error path table: %f\n", errPathTable);
-	printf("min col host: %d | min col device: %d\n", outMinColIdxHost, outMinColIdxDevice);
-	printf("Error seam pos: %f\n", errPos);
+	char * fileName = strtok(argv[1], "."); // Get rid of extension
 
-	// for(int i = 0; i < height; i++){
-	// 	printf("host pos: %d, %d | device pos: %d %d\n", hostSeamPos[i*2], hostSeamPos[i*2+1], deviceSeamPos[i*2], deviceSeamPos[i*2 +  1]);
-	// }
+	writePnm(outPixelsRemove, 3, newWidthRemove, height, concatStr(fileName, "_remove_host.pnm"));
+	writePnm(outPixelsRemoveDevice, 3, newWidthRemove, height, concatStr(fileName, "_remove_device.pnm"));
 
+	writePnm(outPixelAddDevice, 3, newWidthAdd, height, concatStr(fileName, "_add_device.pnm"));
+	writePnm(outPixelAdd, 3, newWidthAdd, height, concatStr(fileName, "_add_host.pnm"));
 
 	free(inPixels);
-	free(hostSeamPos);
-	free(deviceSeamPos);
-	free(outCostTableHost);
-	free(outPathTableHost);
-	free(outCostTableDevice);
-	free(outPathTableDevice);
+	free(outPixelsRemove);
+	free(outPixelsRemoveDevice);
+	free(outPixelAdd);
+	free(outPixelAddDevice);
 }
