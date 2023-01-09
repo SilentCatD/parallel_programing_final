@@ -157,10 +157,16 @@ __global__ void findMinCIdxKernel(int *costTable, int width, int height, int sha
 	if(i1 < width){
 		s_costVal[threadIdx.x] = costTable[lastRowIdx + i1];
 		s_costIdx[threadIdx.x] = i1;
+	}else{
+		s_costVal[threadIdx.x] = INT_MAX;
+		s_costIdx[threadIdx.x] = -1;
 	}
 	if(i2 < width){
 		s_costVal[threadIdx.x + blockDim.x] = costTable[lastRowIdx + i2];
 		s_costIdx[threadIdx.x + blockDim.x] = i2;
+	}else{
+		s_costVal[threadIdx.x + blockDim.x] = INT_MAX;
+		s_costIdx[threadIdx.x + blockDim.x] = -1;
 	}
 	__syncthreads();
 
@@ -184,7 +190,6 @@ __global__ void findMinCIdxKernel(int *costTable, int width, int height, int sha
 	}
 
 }
-
 void findSeam(int minCIdx, int* pathTable, int width, int height, int* seamPos){
 	for(int r = height - 1; r >= 0; r--){
 		seamPos[r * 2] = r;		
