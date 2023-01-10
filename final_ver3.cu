@@ -203,16 +203,10 @@ __global__ void findMinCIdxKernel(int *costTable, int width, int height, int sha
 	if(i1 < width){
 		s_costVal[threadIdx.x] = costTable[lastRowIdx + i1];
 		s_costIdx[threadIdx.x] = i1;
-	}else{
-		s_costVal[threadIdx.x] = INT_MAX;
-		s_costIdx[threadIdx.x] = -1;
 	}
 	if(i2 < width){
 		s_costVal[threadIdx.x + blockDim.x] = costTable[lastRowIdx + i2];
 		s_costIdx[threadIdx.x + blockDim.x] = i2;
-	}else{
-		s_costVal[threadIdx.x + blockDim.x] = INT_MAX;
-		s_costIdx[threadIdx.x + blockDim.x] = -1;
 	}
 	__syncthreads();
 
@@ -236,6 +230,7 @@ __global__ void findMinCIdxKernel(int *costTable, int width, int height, int sha
 	}
 
 }
+
 void findSeam(int minCIdx, int* pathTable, int width, int height, int* seamPos){
 	for(int r = height - 1; r >= 0; r--){
 		seamPos[r] = minCIdx;		
@@ -639,192 +634,94 @@ __global__ void removeSeamOnDeviceKernel(unsigned char * inPixels, int width, in
 	}
 }
 
-void removeNSeam(unsigned char *inPixels, int width, int height, int &newWidth, unsigned char* outPixels, int nSeam = 1, bool useHost = true, dim3 convoBlockSize = dim3(1, 1), dim3 removeSeamBlockSize = dim3(1, 1), int costTableBlockSize = 1024, int minColIdxBlockSize = 512){
 
-	unsigned char* tmpIn = (unsigned char*) malloc(width * height * 3 * sizeof(unsigned char));
-	memcpy(tmpIn, inPixels, width * height * 3 * sizeof(unsigned char));
-	newWidth = width;
+void removeSeamOnHost(unsigned char* inPixels, int width, int height, unsigned char* outPixels){
+	int *hostSeamPos = (int*) malloc(height * 2 * sizeof(int));
+	int *outCostTableHost = (int*) malloc(width * height * sizeof(int));
+	int *outPathTableHost = (int*) malloc(width * height * sizeof(int));
+	int outMinColIdxHost;
+	int newWidth = width - 1;
 
-	int *seamPos = (int*) malloc(height * sizeof(int));
-	int *outCostTable = (int*) malloc(width * height * sizeof(int));
-	int *outPathTable = (int*) malloc(width * height * sizeof(int));
-	int outMinColIdx;
+	findSeamOnHost(inPixels, width, height, hostSeamPos, outCostTableHost, outPathTableHost, outMinColIdxHost);
 
-	unsigned char* d_inPixels,*d_outPixels;
-	int *d_deviceSeamPos;
-
-
-	if(!useHost){
-		cudaDeviceProp devProp;
-		cudaGetDeviceProperties(&devProp, 0);
-		printf("GPU name: %s\n", devProp.name);
-		printf("GPU compute capability: %d.%d\n", devProp.major, devProp.minor);
-
-		CHECK(cudaMalloc(&d_inPixels, 3 * width* height * sizeof(unsigned char)));
-		CHECK(cudaMalloc(&d_outPixels, 3 * width * height * sizeof(unsigned char)));
-		CHECK(cudaMalloc(&d_deviceSeamPos,  height * sizeof(int)));
-	}
-	GpuTimer timer;
-	timer.Start();
-	for(int i=0; i < nSeam;i++){
-		if(useHost){
-			findSeamOnHost(tmpIn, newWidth, height, seamPos, outCostTable, outPathTable, outMinColIdx);
-			for(int r = 0 ; r < height; r++){
-				for(int c = 0; c < newWidth - 1; c++){
-					int seamColIdx = seamPos[r];
-					int outIdx = 3 * (r * (newWidth - 1) + c);
-					int inIdx;
-					if(c < seamColIdx){
-						inIdx = r * newWidth + c;
-					}
-					if(c >= seamColIdx){
-						inIdx = r * newWidth + c + 1;
-					}
-					inIdx*=3;
-					outPixels[outIdx] = tmpIn[inIdx];
-					outPixels[outIdx + 1] = tmpIn[inIdx + 1];
-					outPixels[outIdx + 2] = tmpIn[inIdx + 2];
-				}
-			}
-		}else{
-			dim3 gridSize(((newWidth - 1) - 1) / removeSeamBlockSize.x + 1, (height - 1) / removeSeamBlockSize.y + 1);
-
-			findSeamOnDeivce(tmpIn, newWidth, height, seamPos ,outCostTable, outPathTable, outMinColIdx, convoBlockSize, costTableBlockSize, minColIdxBlockSize);
-
-			CHECK(cudaMemcpy(d_inPixels, tmpIn,  3 * newWidth * height * sizeof(unsigned char), cudaMemcpyHostToDevice));
-
-			CHECK(cudaMemcpy(d_deviceSeamPos, seamPos, height * sizeof(int), cudaMemcpyHostToDevice));
-
-			removeSeamOnDeviceKernel<<<gridSize,removeSeamBlockSize>>>(d_inPixels, newWidth, height, d_outPixels, d_deviceSeamPos);
-
-			CHECK(cudaMemcpy(outPixels, d_outPixels,  3 * newWidth * height * sizeof(unsigned char), cudaMemcpyDeviceToHost));
-		}
-		newWidth--;
-		if(nSeam > 1){
-			memcpy(tmpIn, outPixels, newWidth * height * 3 * sizeof(unsigned char));
-		}
-	}
-
-	timer.Stop();
-	float time = timer.Elapsed();
-	if(useHost){
-		printf("Processing time of host: %f ms\n\n", time);
-	}else{
-		printf("Processing time of device: %f ms\n\n", time);
-	}
-	free(tmpIn);
-	free(seamPos);
-	free(outCostTable);
-	free(outPathTable);
-	if(!useHost){
-		CHECK(cudaFree(d_inPixels));
-		CHECK(cudaFree(d_outPixels));
-		CHECK(cudaFree(d_deviceSeamPos));
-	}
-}
-
-__global__ void addSeamOnDeviceKernel(unsigned char * inPixels, int width, int height, unsigned char* outPixels, int* seamPos){
-	int r = blockIdx.y * blockDim.y + threadIdx.y;
-	int c = blockIdx.x * blockDim.x + threadIdx.x;
-	int newWidth = width + 1;
-	if(r < height && c < newWidth){
-		int seamColIdx = seamPos[r];
-		int outIdx = 3 * (r * newWidth + c);
-		if(c!= seamColIdx){
+	for(int r = 0 ; r < height; r++){
+		for(int c = 0; c < newWidth; c++){
+			int seamColIdx = hostSeamPos[r];
+			int outIdx = 3 * (r * newWidth + c);
 			int inIdx;
 			if(c < seamColIdx){
-				inIdx = r * width  + c;
+				inIdx = r * width + c;
 			}
-			else{
-				inIdx = r * width + c - 1;
+			if(c >= seamColIdx){
+				inIdx = r * width + c + 1;
 			}
 			inIdx*=3;
 			outPixels[outIdx] = inPixels[inIdx];
 			outPixels[outIdx + 1] = inPixels[inIdx + 1];
 			outPixels[outIdx + 2] = inPixels[inIdx + 2];
 		}
-		else{
-			int inIdxR = 3 * (r * width + seamColIdx);
-			int inIdxL = 3 * (r * width + max(0,seamColIdx - 1));
-			outPixels[outIdx] = (inPixels[inIdxR] + inPixels[inIdxL]) / 2;	
-			outPixels[outIdx + 1] = (inPixels[inIdxR + 1] + inPixels[inIdxL + 1]) / 2;	
-			outPixels[outIdx + 2] = (inPixels[inIdxR + 2] + inPixels[inIdxL + 2]) / 2;	
-		}
 	}
+	free(hostSeamPos);
+	free(outCostTableHost);
+	free(outPathTableHost);
 }
 
-void addNSeam(unsigned char *inPixels, int width, int height, int &newWidth, unsigned char* outPixels, int nSeam = 1, bool useHost = true, dim3 convoBlockSize = dim3(1, 1), dim3 addSeamBlockSize = dim3(1, 1), int costTableBlockSize = 1024, int minColIdxBlockSize = 512){
+void removeSeamOnDevice(unsigned char *inPixels, int width, int height, unsigned char* outPixels, dim3 convoBlockSize = dim3(1, 1), dim3 removeSeamBlockSize = dim3(1, 1), int costTableBlockSize = 1024, int minColIdxBlockSize = 512){
+	int *deviceSeamPos = (int*) malloc(height * sizeof(int));
+	int *outCostTableDevice = (int*) malloc(width * height * sizeof(int));
+	int *outPathTableDevice = (int*) malloc(width * height * sizeof(int));
+	int outMinColIdxDevice;
+	int newWidth = width-1;
 
-	unsigned char* tmpIn = (unsigned char*) malloc((width + nSeam) * height * 3 * sizeof(unsigned char));
-	memcpy(tmpIn, inPixels, width * height * 3 * sizeof(unsigned char));
-	newWidth = width;
-
-	int *seamPos = (int*) malloc(height * sizeof(int));
-	int *outCostTable = (int*) malloc((width + nSeam) * height * sizeof(int));
-	int *outPathTable = (int*) malloc((width + nSeam) * height * sizeof(int));
-	int outMinColIdx;
-
+	dim3 gridSize((newWidth - 1) / removeSeamBlockSize.x + 1, (height - 1) / removeSeamBlockSize.y + 1);
 	unsigned char* d_inPixels,*d_outPixels;
 	int *d_deviceSeamPos;
 
+	CHECK(cudaMalloc(&d_inPixels, 3 * width * height * sizeof(unsigned char)));
+	CHECK(cudaMemcpy(d_inPixels, inPixels,  3 * width * height * sizeof(unsigned char), cudaMemcpyHostToDevice));
 
+	CHECK(cudaMalloc(&d_outPixels, 3 * newWidth * height * sizeof(unsigned char)));
+	CHECK(cudaMalloc(&d_deviceSeamPos,  height * sizeof(int)));
+
+
+	findSeamOnDeivce(inPixels, width, height,deviceSeamPos ,outCostTableDevice, outPathTableDevice, outMinColIdxDevice, convoBlockSize, costTableBlockSize, minColIdxBlockSize);
+	CHECK(cudaMemcpy(d_deviceSeamPos, deviceSeamPos, height * sizeof(int), cudaMemcpyHostToDevice));
+
+	removeSeamOnDeviceKernel<<<gridSize,removeSeamBlockSize>>>(d_inPixels, width, height, d_outPixels, d_deviceSeamPos);
+
+	CHECK(cudaMemcpy(outPixels, d_outPixels,  3 * newWidth * height * sizeof(unsigned char), cudaMemcpyDeviceToHost));
+
+	free(deviceSeamPos);
+	free(outCostTableDevice);
+	free(outPathTableDevice);
+	CHECK(cudaFree(d_inPixels));
+	CHECK(cudaFree(d_outPixels));
+	CHECK(cudaFree(d_deviceSeamPos));
+}
+
+void removeNSeam(unsigned char *inPixels, int width, int height, int &newWidth, unsigned char* outPixels, int nSeam = 1, bool useHost = true, dim3 convoBlockSize = dim3(1, 1), dim3 removeSeamBlockSize = dim3(1, 1), int costTableBlockSize = 1024, int minColIdxBlockSize = 512){
+
+	unsigned char* tmpIn = (unsigned char*) malloc(width * height * 3 * sizeof(unsigned char));
+	memcpy(tmpIn, inPixels, width * height * 3 * sizeof(unsigned char));
+	newWidth = width;
 	if(!useHost){
 		cudaDeviceProp devProp;
 		cudaGetDeviceProperties(&devProp, 0);
 		printf("GPU name: %s\n", devProp.name);
 		printf("GPU compute capability: %d.%d\n", devProp.major, devProp.minor);
-
-		CHECK(cudaMalloc(&d_inPixels, 3 * (width + nSeam) * height * sizeof(unsigned char)));
-		CHECK(cudaMalloc(&d_outPixels, 3 * (width + nSeam) * height * sizeof(unsigned char)));
-		CHECK(cudaMalloc(&d_deviceSeamPos,  height * sizeof(int)));
 	}
 	GpuTimer timer;
 	timer.Start();
 	for(int i=0; i < nSeam;i++){
 		if(useHost){
-			findSeamOnHost(tmpIn, newWidth, height, seamPos, outCostTable, outPathTable, outMinColIdx);
-			for(int r = 0 ; r < height; r++){
-				for(int c = 0; c < newWidth + 1; c++){
-					int seamColIdx = seamPos[r];
-					int outIdx = 3 * (r * (newWidth + 1) + c);
-					if(c!= seamColIdx){
-						int inIdx;
-						if(c < seamColIdx){
-							inIdx = r * newWidth + c;
-						}
-						else{
-							inIdx = r * newWidth + c - 1;
-						}
-						inIdx*=3;
-						outPixels[outIdx] = tmpIn[inIdx];
-						outPixels[outIdx + 1] = tmpIn[inIdx + 1];
-						outPixels[outIdx + 2] = tmpIn[inIdx + 2];
-					}
-					else{
-						int inIdxR = 3 * (r * newWidth + seamColIdx);
-						int inIdxL = 3 * (r * newWidth + max(0,seamColIdx - 1));
-						outPixels[outIdx] = (tmpIn[inIdxR] + tmpIn[inIdxL]) / 2;	
-						outPixels[outIdx + 1] = (tmpIn[inIdxR + 1] + tmpIn[inIdxL + 1]) / 2;	
-						outPixels[outIdx + 2] = (tmpIn[inIdxR + 2] + tmpIn[inIdxL + 2]) / 2;	
-					}
-				}
-			}
+			removeSeamOnHost(tmpIn, width, height, outPixels);
 		}else{
-			dim3 gridSize(((newWidth + 1) - 1) / addSeamBlockSize.x + 1, (height - 1) / addSeamBlockSize.y + 1);
-
-			findSeamOnDeivce(tmpIn, newWidth, height,seamPos ,outCostTable, outPathTable, outMinColIdx, convoBlockSize, costTableBlockSize, minColIdxBlockSize);
-
-			CHECK(cudaMemcpy(d_inPixels, tmpIn,  3 * newWidth * height * sizeof(unsigned char), cudaMemcpyHostToDevice));
-
-			CHECK(cudaMemcpy(d_deviceSeamPos, seamPos, height * sizeof(int), cudaMemcpyHostToDevice));
-
-			addSeamOnDeviceKernel<<<gridSize,addSeamBlockSize>>>(d_inPixels, newWidth, height, d_outPixels, d_deviceSeamPos);
-
-			CHECK(cudaMemcpy(outPixels, d_outPixels,  3 * (newWidth + 1) * height * sizeof(unsigned char), cudaMemcpyDeviceToHost));
+			removeSeamOnDevice(tmpIn, width, height, outPixels, convoBlockSize, removeSeamBlockSize, costTableBlockSize, minColIdxBlockSize);
 		}
-		newWidth++;
+		newWidth--;
 		if(nSeam > 1){
-			memcpy(tmpIn, outPixels, newWidth * height * 3 * sizeof(unsigned char));
+			width = newWidth;
+			memcpy(tmpIn, outPixels, width * height * 3 * sizeof(unsigned char));
 		}
 	}
 
@@ -836,62 +733,25 @@ void addNSeam(unsigned char *inPixels, int width, int height, int &newWidth, uns
 		printf("Processing time of device: %f ms\n\n", time);
 	}
 	free(tmpIn);
-	free(seamPos);
-	free(outCostTable);
-	free(outPathTable);
-	if(!useHost){
-		CHECK(cudaFree(d_inPixels));
-		CHECK(cudaFree(d_outPixels));
-		CHECK(cudaFree(d_deviceSeamPos));
-	}
 }
+
+
 int main(int argc, char ** argv)
 {
 
-	if(argc != 4){
-		printf("INVALID ARGUMENT, it must be: <filename>.pnm <nSeam to remove> <nSeam to add>");
-	}
-
 	// Read input image file
-	int width, height, newWidthRemove, newWidthAdd;
-	unsigned char * inPixels, * outPixelsRemove, *outPixelsRemoveDevice, *outPixelAdd, *outPixelAddDevice;
+	int width, height, newWidth;
+	unsigned char * inPixels, * outPixels, *outPixelsDevice;
 	readPnm(argv[1], width, height, inPixels);
-	
-	int nSeamRemove =  atoi(argv[2]);
-	int nSeamAdd =  atoi(argv[3]);
-
-	outPixelsRemove = (unsigned char*) malloc(3 * width * height * sizeof(unsigned char));
-	outPixelsRemoveDevice = (unsigned char*) malloc(3 * width * height * sizeof(unsigned char));
-	outPixelAdd =		(unsigned char*) malloc(3 * (width + nSeamAdd) * height * sizeof(unsigned char));
-	outPixelAddDevice = (unsigned char*) malloc(3 * (width + nSeamAdd) * height * sizeof(unsigned char));
-	
-
+	outPixels = (unsigned char*) malloc(3 * width * height * sizeof(unsigned char));
+	outPixelsDevice = (unsigned char*) malloc(3 * width * height * sizeof(unsigned char));
 	printf("\nImage size (width x height): %i x %i\n", width, height);
+	removeNSeam(inPixels, width, height, newWidth, outPixels, 100);
+	removeNSeam(inPixels, width, height, newWidth, outPixelsDevice, 100, false, dim3(32, 32), dim3(32, 32));
+	float removeSeamError = checkCorrect(outPixels, outPixelsDevice,newWidth,height);
+	printf("Error: %f\n", removeSeamError);
+	writePnm(outPixels, 3, newWidth, height, concatStr(argv[2], "_host.pnm"));
+	writePnm(outPixelsDevice, 3, newWidth, height, concatStr(argv[2], "_device.pnm"));
+	free(outPixels);
 
-	printf("REMOVE SEAM:\n");
-	removeNSeam(inPixels, width, height, newWidthRemove, outPixelsRemove, nSeamRemove);
-	removeNSeam(inPixels, width, height, newWidthRemove, outPixelsRemoveDevice, nSeamRemove, false, dim3(32, 32), dim3(32, 32), 512, 512);
-	float removeSeamError = checkCorrect(outPixelsRemove, outPixelsRemoveDevice,newWidthRemove,height);
-	printf("Remove error: %f\n", removeSeamError);
-	printf("=============================================\n");
-
-	printf("ADD SEAM:\n");
-	addNSeam(inPixels, width, height, newWidthAdd, outPixelAdd, nSeamAdd);
-	addNSeam(inPixels, width, height, newWidthAdd, outPixelAddDevice, nSeamAdd, false, dim3(32, 32), dim3(32, 32), 512, 256);
-	float addSeamError = checkCorrect(outPixelAdd, outPixelAddDevice, newWidthAdd, height);
-	printf("Add error: %f\n", addSeamError);
-
-	char * fileName = strtok(argv[1], "."); // Get rid of extension
-
-	writePnm(outPixelsRemove, 3, newWidthRemove, height, concatStr(fileName, "_remove_host.pnm"));
-	writePnm(outPixelsRemoveDevice, 3, newWidthRemove, height, concatStr(fileName, "_remove_device.pnm"));
-
-	writePnm(outPixelAddDevice, 3, newWidthAdd, height, concatStr(fileName, "_add_device.pnm"));
-	writePnm(outPixelAdd, 3, newWidthAdd, height, concatStr(fileName, "_add_host.pnm"));
-
-	free(inPixels);
-	free(outPixelsRemove);
-	free(outPixelsRemoveDevice);
-	free(outPixelAdd);
-	free(outPixelAddDevice);
 }
