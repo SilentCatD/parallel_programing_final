@@ -260,37 +260,7 @@ void findSeam(int minCIdx, int* pathTable, int width, int height, int* seamPos){
 	}
 }
 
-__global__ void addSeamOnDevice(unsigned char* inPixels, unsigned char* inPixels1, int width, int height, int* deviceSeamPos)
-{
-	// do stuff
-	int r = blockIdx.y * blockDim.y + threadIdx.y;
-	int c = blockIdx.x * blockDim.x + threadIdx.x;
-	if (c < width && r < height) {
-		int i = r * width + c;
-		if (c < deviceSeamPos[2 * r + 1]) {
-			inPixels1[3 * i] = inPixels[3 * i];
-			inPixels1[3 * i + 1] = inPixels[3 * i + 1];
-			inPixels1[3 * i + 2] = inPixels[3 * i + 2];
-		}
-		else if (c == deviceSeamPos[2 * r + 1]) {		
-			int o = r * width + c + 1;
-			inPixels1[3 * i] = inPixels[3 * i];
-			inPixels1[3 * i + 1] = inPixels[3 * i + 1];
-			inPixels1[3 * i + 2] = inPixels[3 * i + 2];
-			inPixels1[3 * o] = inPixels[3 * i];
-			inPixels1[3 * o + 1] = inPixels[3 * i + 1];
-			inPixels1[3 * o + 2] = inPixels[3 * i + 2];
-		}
-		else {	
-			int o = r * width + c + 1;
-			inPixels1[3 * o] = inPixels[3 * i];
-			inPixels1[3 * o + 1] = inPixels[3 * i + 1];
-			inPixels1[3 * o + 2] = inPixels[3 * i + 2];
-		}
-	}
-}
-
-void findSeamOnDeivce(unsigned char* inPixels, int& width, int height, int* deviceSeamPos, int* outCostTable, int* outPathTable, int &outMinColIdx, dim3 convoBlockSize = dim3(1, 1), int costTableBlockSize = 1024, int minColIdxBlockSize = 512){
+void findSeamOnDeivce(unsigned char* inPixels, int width, int height, int* deviceSeamPos, int* outCostTable, int* outPathTable, int &outMinColIdx, dim3 convoBlockSize = dim3(1, 1), int costTableBlockSize = 1024, int minColIdxBlockSize = 512){
 
 	// Allocate memory
 	GpuTimer timer;
@@ -385,7 +355,6 @@ void findSeamOnDeivce(unsigned char* inPixels, int& width, int height, int* devi
 	CHECK(cudaMemcpy(outPathTable, d_pathTable, width * height * sizeof(int), cudaMemcpyDeviceToHost));
 	findSeam(minColumn, outPathTable, width, height, deviceSeamPos);
 	
-	cudaDeviceSynchronize();
 
 	cudaDeviceSynchronize();
 	timer.Stop();
@@ -394,19 +363,6 @@ void findSeamOnDeivce(unsigned char* inPixels, int& width, int height, int* devi
 
 	CHECK(cudaMemcpy(outCostTable, d_costTable, width * height * sizeof(int), cudaMemcpyDeviceToHost));
 	outMinColIdx = minColumn;
-
-	// add seam
-	int* d_SeamPos;
-	CHECK(cudaMalloc(&d_SeamPos, height * sizeof(int) * 2));
-	CHECK(cudaMemcpy(d_SeamPos, deviceSeamPos, height * sizeof(int) * 2, cudaMemcpyHostToDevice));
-	unsigned char* d_inPixels1;
-	for (int num = 0; num < 50; num++) {
-		CHECK(cudaMalloc(&d_inPixels1, (width + 1) * height * sizeof(unsigned char) * 3))
-		addSeamOnDevice<<<gridSize, convoBlockSize>>>(d_inPixels, d_inPixels1, width, height, d_SeamPos);
-		CHECK(cudaFree(d_inPixels));
-		d_inPixels = d_inPixels1;
-		width++;
-	}
 
 	CHECK(cudaFree(d_inPixels));
 	CHECK(cudaFree(d_outGrayScale));
@@ -709,8 +665,6 @@ int main(int argc, char ** argv)
 	printf("min col host: %d | min col device: %d\n", outMinColIdxHost, outMinColIdxDevice);
 	printf("Error seam pos: %f\n", errPos);
 
-	char * outFileNameBase = strtok(argv[2], "."); // Get rid of extension
-	writePnm(outPixels, 1, width, height, concatStr(outFileNameBase, "_device.pnm"));
 	// for(int i = 0; i < height; i++){
 	// 	printf("host pos: %d, %d | device pos: %d %d\n", hostSeamPos[i*2], hostSeamPos[i*2+1], deviceSeamPos[i*2], deviceSeamPos[i*2 +  1]);
 	// }
